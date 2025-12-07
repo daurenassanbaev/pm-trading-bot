@@ -214,12 +214,14 @@ public class TelegramTradingBot extends TelegramLongPollingBot {
             StringBuilder response = new StringBuilder();
             response.append("━━━━━━━━━━━━━━━━━━━━\n");
             response.append("🔮 Результат для ").append(symbol).append("\n\n");
-            response.append(result.getMessage()).append("\n\n");
+
+            String formattedMessage = formatResultMessage(result.getMessage());
+            response.append(formattedMessage).append("\n\n");
 
             if (result.isSuccess()) {
-                response.append("💵 Новый баланс: $").append(result.getNewCashBalance()).append("\n");
+                response.append("💵 Баланс: $").append(result.getNewCashBalance()).append("\n");
                 if (result.getPortfolioUpdate() != null) {
-                    response.append("📈 ").append(result.getPortfolioUpdate()).append("\n");
+                    response.append("📊 ").append(result.getPortfolioUpdate()).append("\n");
                 }
             }
 
@@ -233,6 +235,112 @@ public class TelegramTradingBot extends TelegramLongPollingBot {
         }
     }
 
+    /**
+     * Форматирует сообщение результата, убирая технические детали
+     */
+    private String formatResultMessage(String message) {
+        // Убираем техническую часть "Model predicts..."
+        if (message.contains("💡")) {
+            String[] parts = message.split("💡");
+            String mainPart = parts[0].trim();
+
+            if (parts.length > 1) {
+                String technicalPart = parts[1].trim();
+
+                String formattedReason = formatTechnicalReason(technicalPart);
+
+                return mainPart + "\n\n" + formattedReason;
+            }
+            return mainPart;
+        }
+
+        return message;
+    }
+
+    /**
+     * Преобразует техническую причину в читаемый формат
+     */
+    private String formatTechnicalReason(String technicalReason) {
+        try {
+            // Извлекаем вероятности
+            String upProb = extractProbability(technicalReason, "probability of price going UP");
+            String downProb = extractProbability(technicalReason, "down=");
+
+            if (upProb != null && downProb != null) {
+                double up = Double.parseDouble(upProb);
+                double down = Double.parseDouble(downProb);
+
+                StringBuilder reason = new StringBuilder("🤖 Анализ AI:\n");
+
+                // Определяем тренд
+                if (up > down) {
+                    double diff = (up - down) * 100;
+                    if (diff > 10) {
+                        reason.append(String.format("📈 Рост вероятен (%d%% vs %d%%)\n",
+                                (int)(up * 100), (int)(down * 100)));
+                    } else {
+                        reason.append(String.format("⚖️ Слабый сигнал роста (%d%% vs %d%%)\n",
+                                (int)(up * 100), (int)(down * 100)));
+                    }
+                } else if (down > up) {
+                    double diff = (down - up) * 100;
+                    if (diff > 10) {
+                        reason.append(String.format("📉 Падение вероятно (%d%% vs %d%%)\n",
+                                (int)(down * 100), (int)(up * 100)));
+                    } else {
+                        reason.append(String.format("⚖️ Слабый сигнал падения (%d%% vs %d%%)\n",
+                                (int)(down * 100), (int)(up * 100)));
+                    }
+                } else {
+                    reason.append("⚖️ Неопределенность на рынке\n");
+                }
+
+                return reason.toString();
+            }
+        } catch (Exception e) {
+            log.warn("Не удалось отформатировать причину: {}", e.getMessage());
+        }
+
+        // Если не удалось распарсить, возвращаем упрощенную версию
+        return "🤖 AI рекомендация получена";
+    }
+
+    /**
+     * Извлекает вероятность из текста
+     */
+    private String extractProbability(String text, String pattern) {
+        try {
+            int index = text.indexOf(pattern);
+            if (index == -1) return null;
+
+            // Ищем число после паттерна
+            String remaining = text.substring(index + pattern.length());
+
+            // Для "probability of price going UP" ищем число перед словом
+            if (pattern.contains("going UP")) {
+                String[] words = text.substring(0, index).split(" ");
+                for (int i = words.length - 1; i >= 0; i--) {
+                    try {
+                        return words[i];
+                    } catch (Exception e) {
+                        continue;
+                    }
+                }
+            }
+
+            // Для "down=" извлекаем число после =
+            if (pattern.contains("down=")) {
+                String[] parts = remaining.split("[),\\s]");
+                if (parts.length > 0) {
+                    return parts[0];
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Ошибка извлечения вероятности: {}", e.getMessage());
+        }
+        return null;
+    }
+
     private void handleRunAll(String chatId, String telegramId) {
         sendMessageWithKeyboard(chatId,
                 "🔥 Запуск торговли по всем 5 компаниям!\n" +
@@ -240,61 +348,92 @@ public class TelegramTradingBot extends TelegramLongPollingBot {
 
         StringBuilder summaryResponse = new StringBuilder();
         summaryResponse.append("━━━━━━━━━━━━━━━━━━━━\n");
-        summaryResponse.append("🔥 РЕЗУЛЬТАТЫ ТОРГОВЛИ ПО ВСЕМ КОМПАНИЯМ\n");
+        summaryResponse.append("🔥 РЕЗУЛЬТАТЫ ТОРГОВЛИ\n");
         summaryResponse.append("━━━━━━━━━━━━━━━━━━━━\n\n");
 
-        int successCount = 0;
-        int failCount = 0;
+        int buyCount = 0, sellCount = 0, holdCount = 0;
 
         for (String symbol : SUPPORTED_SYMBOLS) {
             try {
                 log.info("Торгуем {}", symbol);
                 ExecutionResult result = tradingCoordinator.runCycle(telegramId, symbol);
 
-                String actionEmoji = getActionEmoji(result.getMessage());
-                summaryResponse.append(actionEmoji).append(" ").append(symbol).append(": ");
+                String action = extractAction(result.getMessage());
 
-                if (result.isSuccess()) {
-                    // Извлекаем действие из сообщения
-                    String action = extractAction(result.getMessage());
-                    summaryResponse.append(action).append("\n");
-                    successCount++;
-                } else {
-                    summaryResponse.append("ОШИБКА\n");
-                    failCount++;
+                switch (action) {
+                    case "BUY" -> {
+                        buyCount++;
+                        summaryResponse.append(String.format("🟢 %s: Купили %s\n",
+                                symbol, extractShortBuyInfo(result.getMessage())));
+                    }
+                    case "SELL" -> {
+                        sellCount++;
+                        summaryResponse.append(String.format("🔴 %s: Продали %s\n",
+                                symbol, extractShortSellInfo(result.getMessage())));
+                    }
+                    case "HOLD" -> {
+                        holdCount++;
+                        summaryResponse.append(String.format("⚪ %s: Hold\n", symbol));
+                    }
                 }
 
-                // Небольшая задержка между запросами
                 Thread.sleep(500);
 
             } catch (Exception e) {
-                summaryResponse.append("❌ ").append(symbol).append(": ОШИБКА\n");
-                failCount++;
+                summaryResponse.append(String.format("❌ %s: Ошибка\n", symbol));
                 log.error("Ошибка при торговле {}", symbol, e);
             }
         }
 
         summaryResponse.append("\n━━━━━━━━━━━━━━━━━━━━\n");
-        summaryResponse.append(String.format("✅ Успешно: %d | ❌ Ошибок: %d\n", successCount, failCount));
+        summaryResponse.append(String.format("🟢 %d купили | 🔴 %d продали | ⚪ %d hold\n",
+                buyCount, sellCount, holdCount));
 
-        // Получаем обновленный баланс
         User user = userRepository.findByTelegramId(telegramId).orElse(null);
         if (user != null) {
             summaryResponse.append(String.format("💰 Баланс: $%s\n", user.getCash()));
         }
 
-        summaryResponse.append("\nИспользуйте /portfolio для просмотра портфеля");
+        summaryResponse.append("\n/portfolio для деталей 📊");
 
         sendMessageWithKeyboard(chatId, summaryResponse.toString());
     }
 
+    private String extractShortBuyInfo(String message) {
+        try {
+            String[] parts = message.split("Куплено ")[1].split("\n")[0].split(" ");
+            return parts[0] + " шт по $" + parts[4].replace("$", "");
+        } catch (Exception e) {
+            return "выполнено";
+        }
+    }
+
+    private String extractShortSellInfo(String message) {
+        try {
+            String[] parts = message.split("Продано ")[1].split("\n")[0].split(" ");
+            String qty = parts[0];
+            String price = parts[4].replace("$", "");
+
+            // Ищем прибыль/убыток
+            if (message.contains("Прибыль")) {
+                return qty + " шт 📈";
+            } else if (message.contains("Убыток")) {
+                return qty + " шт 📉";
+            }
+            return qty + " шт по $" + price;
+        } catch (Exception e) {
+            return "выполнено";
+        }
+    }
+
     private String extractAction(String message) {
-        if (message.contains("HOLD") || message.contains("💤")) {
-            return "HOLD";
-        } else if (message.contains("Куплено") || message.contains("BUY")) {
+        // Проверяем начало сообщения для точности
+        if (message.startsWith("✅ Куплено")) {
             return "BUY";
-        } else if (message.contains("Продано") || message.contains("SELL")) {
+        } else if (message.startsWith("✅ Продано")) {
             return "SELL";
+        } else if (message.startsWith("💤")) {
+            return "HOLD";
         }
         return "UNKNOWN";
     }
