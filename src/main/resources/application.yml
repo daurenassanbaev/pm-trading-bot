@@ -30,7 +30,7 @@ spring:
 telegram:
   bot:
     username: ai_trading_pm_bot
-    token: 8381514401:AAGTpC3FFHFUrsMD_Cx_ZVzGGQzXoU4tTPQ
+    token: ${TG_BOT_TOKEN:}
 
 ml:
   api:
@@ -39,4 +39,4 @@ ml:
 
 finnhub:
   api:
-    key: d4qmrm1r01quli1dlllgd4qmrm1r01quli1dllm0
+    key: ${F_API_KEY:}
